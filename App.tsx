@@ -14,8 +14,9 @@ import DeviceInfo from 'react-native-device-info';
 
 const { SmsModule } = NativeModules;
 
-const BACKEND_HTTP = 'http://10.33.86.126:5000';
-const BACKEND_WS   = 'ws://10.33.86.126:5000';
+// ⚠️ IMPORTANT: Change this to your computer's IP address
+const BACKEND_HTTP = 'http://10.54.46.126:5000';
+const BACKEND_WS   = 'ws://10.54.46.126:5000';
 
 export default function App() {
   const [deviceId, setDeviceId] = useState<string>('');
@@ -154,83 +155,169 @@ export default function App() {
   };
 
   const connect = async () => {
-    if (!deviceId || !phoneNumber || phoneNumber === 'Detecting...') return;
-    if (wsRef.current) wsRef.current.close();
+    if (!deviceId || !phoneNumber || phoneNumber === 'Detecting...') {
+      console.log('❌ Cannot connect: Missing deviceId or phoneNumber');
+      return;
+    }
+    
+    // Close existing connection
+    if (wsRef.current) {
+      console.log('🔄 Closing old connection');
+      try { wsRef.current.close(); } catch {}
+      wsRef.current = null;
+    }
+    
+    // Clear reconnect timer
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current);
+      reconnectTimer.current = null;
+    }
+    
     setStatus('connecting');
+    console.log('🔌 Connecting to:', BACKEND_WS);
+    console.log('📱 Device ID:', deviceId);
+    console.log('📞 Phone:', phoneNumber);
 
-    // Get FCM token
+    // Get FCM token (fixed deprecated warning)
     let fcmToken = null;
     try {
-      await messaging().requestPermission();
-      fcmToken = await messaging().getToken();
-    } catch {}
+      const authStatus = await messaging().requestPermission();
+      const enabled =
+        authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+        authStatus === messaging.AuthorizationStatus.PROVISIONAL;
+      
+      if (enabled) {
+        fcmToken = await messaging().getToken();
+        console.log('✅ FCM Token obtained');
+      }
+    } catch (err) {
+      console.log('⚠️ FCM error:', err.message);
+    }
 
-    const ws = new WebSocket(BACKEND_WS);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setStatus('connected');
-      ws.send(JSON.stringify({
-        type: 'register',
-        deviceId: deviceId,
-        userId: 'admin',
-        deviceName: `${deviceBrand} ${deviceModel}`,
-        phoneNumber: phoneNumber,
-        battery: battery,
-        charging: charging,
-        network: 'WiFi',
-        fcmToken,
-      }));
-    };
-
-    ws.onmessage = async (e) => {
-      try {
-        const data = JSON.parse(e.data);
-
-        if (data.type === 'send_sms') {
-          const { phone, message } = data;
-          const hasPermission = await requestSmsPermission();
-          if (!hasPermission) return;
-          sendSms(phone, message);
+    try {
+      console.log('🔗 Creating WebSocket...');
+      const ws = new WebSocket(BACKEND_WS);
+      wsRef.current = ws;
+      
+      // Connection timeout
+      const connectionTimeout = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          console.log('⏱️ Connection timeout - closing');
+          ws.close();
         }
+      }, 10000);
 
-        if (data.type === 'ping') {
-          // Update battery before sending pong
-          try {
-            const currentBattery = await DeviceInfo.getBatteryLevel();
-            const isCharging = await DeviceInfo.isBatteryCharging();
-            const newBattery = Math.round(currentBattery * 100);
-            setBattery(newBattery);
-            setCharging(isCharging);
-            
-            ws.send(JSON.stringify({ 
-              type: 'pong', 
-              deviceId: deviceId, 
-              battery: newBattery, 
-              charging: isCharging, 
-              network: 'WiFi' 
-            }));
-          } catch {
-            ws.send(JSON.stringify({ 
-              type: 'pong', 
-              deviceId: deviceId, 
-              battery: battery, 
-              charging: charging, 
-              network: 'WiFi' 
-            }));
+      ws.onopen = () => {
+        clearTimeout(connectionTimeout);
+        console.log('✅ WebSocket CONNECTED!');
+        setStatus('connected');
+        
+        const registerData = {
+          type: 'register',
+          deviceId: deviceId,
+          userId: 'admin',
+          deviceName: `${deviceBrand} ${deviceModel}`,
+          phoneNumber: phoneNumber,
+          battery: battery,
+          charging: charging,
+          network: 'WiFi',
+          fcmToken,
+        };
+        
+        console.log('📤 Sending register:', JSON.stringify(registerData, null, 2));
+        ws.send(JSON.stringify(registerData));
+      };
+
+      ws.onmessage = async (e) => {
+        console.log('📥 Message received:', e.data);
+        try {
+          const data = JSON.parse(e.data);
+
+          if (data.type === 'registered') {
+            console.log('✅ Device registered successfully');
           }
+
+          if (data.type === 'send_sms') {
+            console.log('📨 SMS request for:', data.phone);
+            const { phone, message } = data;
+            const hasPermission = await requestSmsPermission();
+            if (!hasPermission) {
+              console.log('❌ SMS permission denied');
+              return;
+            }
+            sendSms(phone, message);
+          }
+
+          if (data.type === 'ping') {
+            console.log('🏓 Ping received, sending pong');
+            try {
+              const currentBattery = await DeviceInfo.getBatteryLevel();
+              const isCharging = await DeviceInfo.isBatteryCharging();
+              const newBattery = Math.round(currentBattery * 100);
+              setBattery(newBattery);
+              setCharging(isCharging);
+              
+              ws.send(JSON.stringify({ 
+                type: 'pong', 
+                deviceId: deviceId, 
+                battery: newBattery, 
+                charging: isCharging, 
+                network: 'WiFi' 
+              }));
+            } catch {
+              ws.send(JSON.stringify({ 
+                type: 'pong', 
+                deviceId: deviceId, 
+                battery: battery, 
+                charging: charging, 
+                network: 'WiFi' 
+              }));
+            }
+          }
+        } catch (err) {
+          console.log('❌ Message parse error:', err.message);
         }
-      } catch {}
-    };
+      };
 
-    ws.onerror = () => {
-      setStatus('disconnected');
-    };
+      ws.onerror = (error) => {
+        clearTimeout(connectionTimeout);
+        console.log('❌ WebSocket ERROR:', error.message);
+        setStatus('disconnected');
+      };
 
-    ws.onclose = () => {
+      ws.onclose = (event) => {
+        clearTimeout(connectionTimeout);
+        console.log('🔴 WebSocket CLOSED');
+        console.log('   Code:', event.code);
+        console.log('   Reason:', event.reason || 'No reason provided');
+        console.log('   Clean:', event.wasClean);
+        
+        setStatus('disconnected');
+        wsRef.current = null;
+        
+        // Reconnect if not manually closed
+        if (event.code !== 1000 && reconnectTimer.current === null) {
+          console.log('⏰ Reconnecting in 5 seconds...');
+          reconnectTimer.current = setTimeout(() => {
+            reconnectTimer.current = null;
+            console.log('🔄 Attempting reconnect...');
+            connect();
+          }, 5000);
+        }
+      };
+    } catch (err) {
+      console.log('❌ WebSocket creation failed:', err.message);
       setStatus('disconnected');
-      reconnectTimer.current = setTimeout(() => connect(), 5000);
-    };
+      wsRef.current = null;
+      
+      if (reconnectTimer.current === null) {
+        console.log('⏰ Retry in 5 seconds...');
+        reconnectTimer.current = setTimeout(() => {
+          reconnectTimer.current = null;
+          connect();
+        }, 5000);
+      }
+    }
   };
 
   const statusColor = status === 'connected' ? '#10b981' : status === 'connecting' ? '#f59e0b' : '#ef4444';
