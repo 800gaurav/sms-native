@@ -15,10 +15,10 @@ import DeviceInfo from 'react-native-device-info';
 const { SmsModule, SmsService } = NativeModules;
 
 // ⚠️ IMPORTANT: Change this to your computer's IP address
-// const BACKEND_HTTP = 'http://10.88.143.49:5000';
-// const BACKEND_WS   = 'ws://10.88.143.49:5000';
-const BACKEND_HTTP = 'https://api.sms.genzteck.com';
-const BACKEND_WS   = 'wss://api.sms.genzteck.com';
+const BACKEND_HTTP = 'http://10.52.171.126:5000';
+const BACKEND_WS   = 'ws://10.52.171.126:5000';
+// const BACKEND_HTTP = 'https://api.sms.genzteck.com';
+// const BACKEND_WS   = 'wss://api.sms.genzteck.com';
 
 export default function App() {
   const [deviceId, setDeviceId] = useState<string>('');
