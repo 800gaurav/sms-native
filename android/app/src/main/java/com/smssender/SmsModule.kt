@@ -1,32 +1,26 @@
 package com.smssender
 
-import android.telephony.SmsManager
-import android.os.Build
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.Promise
 
 class SmsModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
 
     override fun getName() = "SmsModule"
 
     @ReactMethod
-    fun sendSms(phone: String, message: String) {
-        try {
-            val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                reactApplicationContext.getSystemService(SmsManager::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                SmsManager.getDefault()
-            }
-            val parts = smsManager.divideMessage(message)
-            if (parts.size == 1) {
-                smsManager.sendTextMessage(phone, null, message, null, null)
-            } else {
-                smsManager.sendMultipartTextMessage(phone, null, parts, null, null)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+    fun hasSmsPermission(promise: Promise) {
+        promise.resolve(SmsSender.hasPermission(reactApplicationContext))
+    }
+
+    @ReactMethod
+    fun sendSms(phone: String, message: String, promise: Promise) {
+        val sent = SmsSender.send(reactApplicationContext, phone, message)
+        if (sent) {
+            promise.resolve(true)
+        } else {
+            promise.reject("SMS_SEND_FAILED", "SMS could not be queued. Check permission, SIM, phone number and message.")
         }
     }
 }

@@ -12,11 +12,13 @@ import messaging from '@react-native-firebase/messaging';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DeviceInfo from 'react-native-device-info';
 
-const { SmsModule } = NativeModules;
+const { SmsModule, SmsService } = NativeModules;
 
 // ⚠️ IMPORTANT: Change this to your computer's IP address
-const BACKEND_HTTP = 'http://10.54.46.126:5000';
-const BACKEND_WS   = 'ws://10.54.46.126:5000';
+const BACKEND_HTTP = 'http://10.88.143.49:5000';
+const BACKEND_WS   = 'ws://10.88.143.49:5000';
+// const BACKEND_HTTP = 'https://api.sms.genzteck.com';
+// const BACKEND_WS   = 'wss://api.sms.genzteck.com';
 
 export default function App() {
   const [deviceId, setDeviceId] = useState<string>('');
@@ -38,13 +40,24 @@ export default function App() {
     // Request all permissions first
     if (Platform.OS === 'android') {
       try {
-        await PermissionsAndroid.requestMultiple([
+        const permissions = [
           PermissionsAndroid.PERMISSIONS.SEND_SMS,
           PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE,
           PermissionsAndroid.PERMISSIONS.READ_PHONE_NUMBERS,
           PermissionsAndroid.PERMISSIONS.READ_SMS,
-        ]);
-      } catch (err) {
+        ];
+        
+        // Add notification permission for Android 13+
+        if (Platform.Version >= 33) {
+          permissions.push(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+        }
+        
+        const results = await PermissionsAndroid.requestMultiple(permissions);
+        if (results[PermissionsAndroid.PERMISSIONS.SEND_SMS] !== PermissionsAndroid.RESULTS.GRANTED) {
+          console.warn('SEND_SMS permission denied. SMS sending will not work.');
+        }
+        SmsService?.startService?.();
+      } catch (err: any) {
         console.warn('Permission error:', err);
       }
     }
@@ -64,7 +77,7 @@ export default function App() {
       
       // Method 1: DeviceInfo
       try {
-        const num = await DeviceInfo.getPhoneNumber();
+        const num = await (DeviceInfo as any).getPhoneNumber?.();
         if (num && num.length > 3 && !num.includes('unknown')) {
           detectedNumber = num;
         }
@@ -116,19 +129,26 @@ export default function App() {
     if (!deviceId || !phoneNumber || phoneNumber === 'Detecting...') return;
     connect();
 
+    const tokenRefreshUnsubscribe = messaging().onTokenRefresh(async (token) => {
+      console.log('FCM Token refreshed:', token?.substring(0, 20) + '...');
+      await registerDeviceHttp(token);
+      connect();
+    });
+
     // FCM foreground messages
     const unsubscribe = messaging().onMessage(async (remoteMessage) => {
       const { type, phone, message } = remoteMessage.data || {};
-      if (type === 'send_sms' && phone && message) {
+      if (type === 'send_sms' && typeof phone === 'string' && typeof message === 'string') {
         const hasPermission = await requestSmsPermission();
         if (hasPermission) {
-          sendSms(phone, message);
+          await sendSms(phone, message);
         }
       }
     });
 
     return () => {
       unsubscribe();
+      tokenRefreshUnsubscribe();
       wsRef.current?.close();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     };
@@ -144,14 +164,56 @@ export default function App() {
     return granted === PermissionsAndroid.RESULTS.GRANTED;
   };
 
-  const sendSms = (phone: string, message: string) => {
-    if (SmsModule) {
-      SmsModule.sendSms(phone, message);
+  const sendSms = async (phone: string, message: string) => {
+    if (!SmsModule?.sendSms) {
+      console.log('SMS native module is not available');
+      return false;
     }
-    // Increment counter
-    const newCount = messagesSent + 1;
-    setMessagesSent(newCount);
-    AsyncStorage.setItem('messagesSent', newCount.toString());
+    try {
+      await SmsModule.sendSms(phone, message);
+      setMessagesSent(prev => {
+        const newCount = prev + 1;
+        AsyncStorage.setItem('messagesSent', newCount.toString());
+        return newCount;
+      });
+      return true;
+    } catch (err: any) {
+      console.log('SMS send failed:', err?.message || err);
+      return false;
+    }
+  };
+
+  const registerDeviceHttp = async (fcmToken: string | null) => {
+    if (!deviceId || !phoneNumber || phoneNumber === 'Detecting...') return false;
+
+    try {
+      const currentBattery = await DeviceInfo.getBatteryLevel();
+      const isCharging = await DeviceInfo.isBatteryCharging();
+      const response = await fetch(`${BACKEND_HTTP}/devices/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId,
+          deviceName: `${deviceBrand} ${deviceModel}`,
+          phoneNumber,
+          battery: Math.round(currentBattery * 100),
+          charging: isCharging,
+          network: 'WiFi',
+          fcmToken,
+        }),
+      });
+
+      if (response.ok) {
+        console.log('Device registered via HTTP');
+        return true;
+      }
+
+      console.log('HTTP registration failed');
+    } catch (err: any) {
+      console.log('HTTP registration error:', err.message);
+    }
+
+    return false;
   };
 
   const connect = async () => {
@@ -188,10 +250,46 @@ export default function App() {
       
       if (enabled) {
         fcmToken = await messaging().getToken();
-        console.log('✅ FCM Token obtained');
+        console.log('✅ FCM Token obtained:', fcmToken?.substring(0, 20) + '...');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.log('⚠️ FCM error:', err.message);
+    }
+
+    await registerDeviceHttp(fcmToken);
+
+    // If no WebSocket URL or it's a production domain, use FCM-only mode
+    if (!BACKEND_WS || BACKEND_WS.includes('genzteck.com')) {
+      console.log('📡 Using FCM-only mode (no WebSocket)');
+      
+      // Register device via HTTP
+      try {
+        const response = await fetch(`${BACKEND_HTTP}/devices/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deviceId,
+            deviceName: `${deviceBrand} ${deviceModel}`,
+            phoneNumber,
+            battery,
+            charging,
+            network: 'WiFi',
+            fcmToken,
+          }),
+        });
+        
+        if (response.ok) {
+          console.log('✅ Device registered via HTTP');
+          setStatus('connected');
+        } else {
+          console.log('❌ HTTP registration failed');
+          setStatus('disconnected');
+        }
+      } catch (err: any) {
+        console.log('❌ HTTP registration error:', err.message);
+        setStatus('disconnected');
+      }
+      return;
     }
 
     try {
@@ -245,7 +343,7 @@ export default function App() {
               console.log('❌ SMS permission denied');
               return;
             }
-            sendSms(phone, message);
+            await sendSms(phone, message);
           }
 
           if (data.type === 'ping') {
@@ -274,7 +372,7 @@ export default function App() {
               }));
             }
           }
-        } catch (err) {
+        } catch (err: any) {
           console.log('❌ Message parse error:', err.message);
         }
       };
@@ -290,7 +388,7 @@ export default function App() {
         console.log('🔴 WebSocket CLOSED');
         console.log('   Code:', event.code);
         console.log('   Reason:', event.reason || 'No reason provided');
-        console.log('   Clean:', event.wasClean);
+        console.log('   Clean:', (event as any).wasClean);
         
         setStatus('disconnected');
         wsRef.current = null;
@@ -305,7 +403,7 @@ export default function App() {
           }, 5000);
         }
       };
-    } catch (err) {
+    } catch (err: any) {
       console.log('❌ WebSocket creation failed:', err.message);
       setStatus('disconnected');
       wsRef.current = null;
